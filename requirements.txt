@@ -1,0 +1,10 @@
+#pip install langchain_core
+#pip install langchain_community
+#pip install pyaudio
+#pip install openai
+#pip install chromadb
+#pip install SpeechRecognition
+#pip install loguru
+#pip install fastapi
+#pip install websockets
+#pip install pydantic

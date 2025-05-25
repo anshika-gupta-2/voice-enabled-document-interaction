@@ -1,0 +1,191 @@
+# app.py
+import streamlit as st
+import os
+from pathlib import Path
+import asyncio
+import websockets
+import json
+import uuid
+from dotenv import load_dotenv
+from typing import Optional
+import time
+from datetime import datetime
+
+load_dotenv()
+
+from domains.injestion.models import InjestRequestDto
+from domains.models import RequestStatusEnum
+from domains.injestion.routes import injest_doc
+from domains.agents.routes import react_orchestrator
+from domains.retreival.models import RagUseCase, RAGGenerationResponse, Message
+from domains.retreival.routes import run_rag
+from pathlib import Path
+
+# Session state initialization
+if 'user' not in st.session_state:
+    st.session_state.user = None
+if 'role' not in st.session_state:
+    st.session_state.role = None
+if 'chat_mode' not in st.session_state:
+    st.session_state.chat_mode = 'agent'  # or 'streaming'
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
+
+
+def login():
+    st.title("Login")
+    username = st.text_input("Username", value="admin", max_chars=20, autocomplete="username", key="admin")
+    password = st.text_input("Password", max_chars=20, autocomplete="new-password")
+    if st.button("Login"):
+        # Simplified login logic - replace with proper authentication
+        if username == "admin" and password == "admin":
+            st.session_state.user = username
+            st.session_state.role = "admin"
+            st.rerun()
+        elif username == "user" and password == "user":
+            st.session_state.user = username
+            st.session_state.role = "user"
+            st.rerun()
+        else:
+            st.error("Invalid credentials")
+
+async def handle_file_upload(file, file_path):
+    request = InjestRequestDto(
+        request_id=int(uuid.uuid4()),
+        pre_signed_url=str(file_path),
+        file_name=file.name,
+        original_file_name=file.name,
+        file_type=file.name.split('.')[-1],
+        namespace=str(st.session_state.user),  # Use username as namespace
+        process_type=file.name.split('.')[-1],  # Placeholder status endpoint
+    )
+
+    response = await injest_doc(request)
+    return response
+
+
+def upload_files():
+    uploaded_files = st.file_uploader("Upload documents",
+                                      type=["pdf", "txt", "docx"],
+                                      accept_multiple_files=True)
+
+    if uploaded_files:
+        for file in uploaded_files:
+            file_path = Path("temp") / file.name
+            file_path.parent.mkdir(exist_ok=True)
+
+            # Save file
+            with open(file_path, "wb") as f:
+                f.write(file.getbuffer())
+
+            # Prepare ingestion request
+            request = InjestRequestDto(
+                request_id=int(uuid.uuid4()),
+                pre_signed_url=Path(file_path),
+                file_name=file.name,
+                original_file_name=file.name,
+                file_type=file.name.split('.')[-1],
+                namespace=st.session_state.user,  # Use username as namespace
+                response_data_api_path="/status"  # Placeholder status endpoint
+            )
+
+            try:
+                # Attempt ingestion
+                response = asyncio.run(handle_file_upload(file, file_path))
+
+                if response.status == RequestStatusEnum.COMPLETED:
+                    st.success(f"File {file.name} Processed successfully.")
+
+                elif response.status == RequestStatusEnum.FAILED:
+                    st.error(f"Failed to process {file.name}: {response.error_detail}.")
+
+                else:
+                    st.info(f"Processing {file.name}...")
+                    # Poll for ingestion status
+                    max_retries = 3
+                    retry_count = 0
+
+            except Exception as e:
+                st.error(f"Failed to ingest {file.name}: {str(e)}") #st.errr
+
+            finally:
+                # Cleanup temp file
+                if file_path.exists():
+                    file_path.unlink()
+
+                    while retry_count < max_retries:
+                        time.sleep(2)  # Wait before checking status
+                        # Replace with actual status check
+                        ingestion_complete = True  # Placeholder
+
+                        if ingestion_complete:
+                            break
+                        retry_count += 1
+
+                    if retry_count == max_retries:
+                        st.warning(f"Ingestion status unknown for {file.name}")
+
+
+
+
+def chat_interface():
+    st.sidebar.title("Chat Settings")
+    st.session_state.chat_mode = st.sidebar.selectbox(
+        "Select Chat Mode",
+        ["Agent-based RAG", "Streaming RAG"]
+    )
+
+    # Chat interface
+    st.title("Chat with Documents")
+
+    # Display chat history
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
+
+    # Chat input
+    if prompt := st.chat_input("Ask a question about your documents"):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+
+        try:
+            if st.session_state.chat_mode == "Agent-based RAG":
+                response = react_orchestrator(prompt, str(uuid.uuid4()))
+            else:
+                response = run_rag(
+                    question=prompt,
+                    language="en",
+                    namespace=st.session_state.user
+                )
+
+            st.session_state.messages.append({"role": "assistant", "content": response})
+
+        except Exception as e:
+            st.error(f"Error processing request: {str(e)}")
+
+
+def main():
+    st.set_page_config(
+        page_title="Document Chat System",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+
+    if not st.session_state.user:
+        login()
+    else:
+        st.sidebar.title(f"Welcome {st.session_state.user}")
+        if st.sidebar.button("Logout"):
+            st.session_state.clear()
+            st.rerun()
+
+        tab1, tab2 = st.tabs(["Upload Documents", "Chat"])
+
+        with tab1:
+            upload_files()
+
+        with tab2:
+            chat_interface()
+
+
+if __name__ == "__main__":
+    main()
